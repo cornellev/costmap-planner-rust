@@ -1,0 +1,36 @@
+[workspace]
+authors = ["smriti-kumar <sk3452@cornell.edu>"]
+channels = ["conda-forge", "robostack-humble"]
+name = "costmap_planner_rs"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+costmap = { cmd = "ros2 bag play costmap2_0.db3 --loop", cwd = "costmap" }
+base_link_tf = { cmd = "ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 map base_link", cwd = "." }
+rslidar_tf = { cmd = "ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 map rslidar", cwd = "." }
+rviz = { cmd = "rviz2", cwd = "." }
+build_rust = { cmd = "colcon build", cwd = "rust_ws" }
+astar = { cmd = "bash -c 'source install/setup.bash && ros2 run costmap_planner_rs a_star'", cwd = "rust_ws" }
+all = "pixi run costmap & pixi run base_link_tf & pixi run rslidar_tf & pixi run astar & pixi run spline & pixi run rviz"
+
+[dependencies]
+ros-humble-desktop = ">=0.10.0,<0.11"
+ros-humble-turtlesim = ">=1.4.3,<2"
+ros-humble-ros-base = ">=0.10.0,<0.11"
+ros-humble-nav-msgs = "*"
+ros-humble-navigation2 = ">=1.1.20,<2"
+ros-humble-nav2-bringup = ">=1.1.20,<2"
+ros-humble-nav2-common = ">=1.1.20,<2"
+scipy = ">=1.17.1,<2"
+
+rust = "*"
+clangdev = "*"
+cmake = "*"
+pkg-config = "*"
+
+[pypi-dependencies]
+colcon-cargo = { git = "https://github.com/colcon/colcon-cargo.git" }
+colcon-ros-cargo = { git = "https://github.com/colcon/colcon-ros-cargo.git" }
+colcon-package-selection = "*"
+vcstool = "*"
