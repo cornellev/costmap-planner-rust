@@ -1,5 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use rclrs::*;
 use nav2_msgs::msg::Costmap;
 use nav_msgs::msg::Path;
@@ -32,6 +36,7 @@ fn heuristic_dist(a: (usize, usize), b: (usize, usize)) -> f64 {
     dr + dc
 }
 
+/*
 fn find_free_start(grid: &Grid) -> Option<(usize, usize)> {
     let rows = grid.rows as isize;
     let cols = grid.cols as isize;
@@ -54,6 +59,63 @@ fn find_free_start(grid: &Grid) -> Option<(usize, usize)> {
     None
 }
 
+*/
+
+fn world_to_cell(x: f64, y: f64, costmap: &Costmap) -> Option<(usize, usize)> {
+    let resolution = costmap.metadata.resolution as f64;
+    let column = ((x - costmap.metadata.origin.position.x) / resolution).floor();
+    let row = ((y - costmap.metadata.origin.position.y) / resolution).floor();
+    if row < 0.0
+        || column < 0.0
+        || row >= costmap.metadata.size_y as f64
+        || column >= costmap.metadata.size_x as f64
+    {
+        return None;
+    }
+    Some((row as usize, column as usize))
+}
+
+fn local_goal_cell(
+    grid: &Grid,
+    start_world: (f64, f64),
+    goal_world: (f64, f64),
+    costmap: &Costmap,
+) -> Option<(usize, usize)> {
+    if let Some(goal) = world_to_cell(goal_world.0, goal_world.1, costmap) {
+        return Some(goal);
+    }
+
+    // rolling window logic, ignore it no goal cell (probably would become centerlines)
+    let dx = goal_world.0 - start_world.0;
+    let dy = goal_world.1 - start_world.1;
+    let distance = (dx * dx + dy * dy).sqrt();
+    if distance <= f64::EPSILON {
+        return None;
+    }
+    let step_x = dx / distance;
+    let step_y = dy / distance;
+    let max_distance = (costmap.metadata.size_x.min(costmap.metadata.size_y) as f64
+        * costmap.metadata.resolution as f64)
+        * 0.45;
+
+    // stupid code for rolling, scrapped, ignore it
+    let mut travel = max_distance;
+    while travel > 0.0 {
+        let candidate = (
+            start_world.0 + step_x * travel,
+            start_world.1 + step_y * travel,
+        );
+        if let Some(cell) = world_to_cell(candidate.0, candidate.1, costmap) {
+            if grid.at(cell.0, cell.1) < 253 {
+                return Some(cell);
+            }
+        }
+        travel -= costmap.metadata.resolution as f64;
+    }
+    None
+}
+
+/*
 fn find_free_goal_forward(grid: &Grid, start: (usize, usize), target_dist: isize,) -> Option<(usize, usize)> {
     let rows = grid.rows as isize;
     let cols = grid.cols as isize;
@@ -86,6 +148,8 @@ fn find_free_goal_forward(grid: &Grid, start: (usize, usize), target_dist: isize
 
     None
 }
+
+*/
 
 fn astar(grid: &Grid, start: (usize, usize), goal: (usize, usize)) -> Option<Vec<(usize, usize)>> {
     let mut open_set = BinaryHeap::new();
@@ -151,13 +215,27 @@ fn build_path_msg(path: &[(usize, usize)], costmap: &Costmap, clock: &Clock) -> 
     for &(r, c) in path {
         let mut pose = PoseStamped::default();
         pose.header = path_out.header.clone();
-        pose.pose.position.x = origin_x + (c as f64) * resolution;
-        pose.pose.position.y = origin_y + (r as f64) * resolution;
+        pose.pose.position.x = origin_x + (c as f64 + 0.5) * resolution;
+        pose.pose.position.y = origin_y + (r as f64 + 0.5) * resolution;
         pose.pose.position.z = 0.0;
         path_out.poses.push(pose);
     }
 
     path_out
+}
+
+fn write_timing_row(timing_file: &Arc<Mutex<std::fs::File>>, row: &str) {
+    if let Ok(mut file) = timing_file.lock() {
+        let _ = writeln!(file, "{}", row);
+        let _ = file.flush();
+    }
+}
+
+fn timestamp_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 fn main() -> Result<(), RclrsError> {
@@ -167,38 +245,141 @@ fn main() -> Result<(), RclrsError> {
     let publisher = node.create_publisher::<Path>("/astar_path")?;
     let logger = node.logger().clone();
     let clock = node.get_clock();
+    let timing_file = Arc::new(Mutex::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("astar_timing.csv")
+            .expect("unable to open astar_timing.csv"),
+    ));
+    if let Ok(mut file) = timing_file.lock() {
+        let _ = file.write_all(
+            b"timestamp_ns,rows,cols,start_row,start_col,goal_row,goal_col,path_steps,astar_ms,found\n",
+        );
+    }
+
+    let pose_state = Arc::new(Mutex::new(None::<(f64, f64)>));
+    let goal_state = Arc::new(Mutex::new(None::<(f64, f64)>));
+
+    let pose_for_subscription = Arc::clone(&pose_state);
+    let _pose_subscription = node.create_subscription(
+        "/sim_pose",
+        move |msg: PoseStamped| {
+            if let Ok(mut pose) = pose_for_subscription.lock() {
+                *pose = Some((msg.pose.position.x, msg.pose.position.y));
+            }
+        },
+    )?;
+
+    let goal_for_subscription = Arc::clone(&goal_state);
+    let _goal_subscription = node.create_subscription(
+        "/goal_pose",
+        move |msg: PoseStamped| {
+            if let Ok(mut goal) = goal_for_subscription.lock() {
+                *goal = Some((msg.pose.position.x, msg.pose.position.y));
+            }
+        },
+    )?;
+
+    let pose_state_for_costmap = Arc::clone(&pose_state);
+    let goal_state_for_costmap = Arc::clone(&goal_state);
+    let timing_file_for_costmap = Arc::clone(&timing_file);
 
     let _subscription = node.create_subscription(
         "/costmap_raw",
         move |msg: Costmap| {
             let grid = costmap_to_grid(&msg);
 
-            let start = match find_free_start(&grid) {
-                Some(s) => s,
+            let start_world = match pose_state_for_costmap.lock().ok().and_then(|pose| *pose) {
+                Some(pose) => pose,
                 None => {
-                    log_warn!(&logger, "no free start found");
+                    log_warn!(&logger, "waiting for simulator start pose");
                     return;
                 }
             };
 
-            let goal = match find_free_goal_forward(&grid, start, 150) {
-                Some(g) => g,
+            let goal_world = match goal_state_for_costmap.lock().ok().and_then(|goal| *goal) {
+                Some(goal) => goal,
                 None => {
-                    log_warn!(&logger, "no forward goal found");
+                    log_warn!(&logger, "waiting for simulator map goal");
                     return;
                 }
             };
+
+            let start = match world_to_cell(start_world.0, start_world.1, &msg) {
+                Some(cell) => cell,
+                None => {
+                    log_warn!(&logger, "simulator start is outside rolling costmap");
+                    return;
+                }
+            };
+            let goal = match local_goal_cell(&grid, start_world, goal_world, &msg) {
+                Some(cell) => cell,
+                None => {
+                    log_warn!(&logger, "no free local goal toward simulator goal");
+                    return;
+                }
+            };
+
+            // problematic
+            if grid.at(start.0, start.1) >= 253 || grid.at(goal.0, goal.1) >= 253 {
+                log_warn!(&logger, "start or goal is occupied in inflated costmap");
+                return;
+            }
 
             log_info!(&logger, "start={:?} goal={:?}", start, goal);
+            let planning_started = Instant::now();
             let path = match astar(&grid, start, goal) {
                 Some(p) => p,
                 None => {
-                    log_warn!(&logger, "found no path from {:?} to {:?}", start, goal);
+                    let elapsed_ms = planning_started.elapsed().as_secs_f64() * 1000.0;
+                    write_timing_row(
+                        &timing_file_for_costmap,
+                        &format!(
+                            "{},{},{},{},{},{},{},0,{:.6},false",
+                            timestamp_ns(),
+                            grid.rows,
+                            grid.cols,
+                            start.0,
+                            start.1,
+                            goal.0,
+                            goal.1,
+                            elapsed_ms
+                        ),
+                    );
+                    log_warn!(
+                        &logger,
+                        "found no path from {:?} to {:?}; astar_ms={:.3}",
+                        start,
+                        goal,
+                        planning_started.elapsed().as_secs_f64() * 1000.0
+                    );
                     return;
                 }
             };
 
-            log_info!(&logger, "path found: {} steps", path.len());
+            let elapsed_ms = planning_started.elapsed().as_secs_f64() * 1000.0;
+            write_timing_row(
+                &timing_file_for_costmap,
+                &format!(
+                    "{},{},{},{},{},{},{},{},{:.6},true",
+                    timestamp_ns(),
+                    grid.rows,
+                    grid.cols,
+                    start.0,
+                    start.1,
+                    goal.0,
+                    goal.1,
+                    path.len(),
+                    elapsed_ms
+                ),
+            );
+            log_info!(
+                &logger,
+                "path found: {} steps; astar_ms={:.3}",
+                path.len(),
+                elapsed_ms
+            );
             let path_msg = build_path_msg(&path, &msg, &clock);
             publisher.publish(&path_msg).unwrap();
         },
