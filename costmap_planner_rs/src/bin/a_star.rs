@@ -202,22 +202,155 @@ fn astar(grid: &Grid, start: (usize, usize), goal: (usize, usize)) -> Option<Vec
     None
 }
 
+fn path_to_world_points(path: &[(usize, usize)], costmap: &Costmap) -> Vec<(f64, f64)> {
+    let resolution = costmap.metadata.resolution as f64;
+    let origin_x = costmap.metadata.origin.position.x;
+    let origin_y = costmap.metadata.origin.position.y;
+
+    path.iter()
+        .map(|&(r, c)| {
+            (
+                origin_x + (c as f64 + 0.5) * resolution,
+                origin_y + (r as f64 + 0.5) * resolution,
+            )
+        })
+        .collect()
+}
+
+fn simplify_path(points: &[(f64, f64)], min_step_sq: f64) -> Vec<(f64, f64)> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+
+    let mut simplified = vec![points[0]];
+    for &point in &points[1..points.len() - 1] {
+        let last = *simplified.last().unwrap();
+        let dx = point.0 - last.0;
+        let dy = point.1 - last.1;
+        if dx * dx + dy * dy >= min_step_sq {
+            simplified.push(point);
+        }
+    }
+    simplified.push(*points.last().unwrap());
+    simplified
+}
+
+fn smooth_path(points: &[(f64, f64)], window: usize) -> Vec<(f64, f64)> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+
+    let mut smoothed = Vec::with_capacity(points.len());
+    let radius = window / 2;
+    for i in 0..points.len() {
+        let start = i.saturating_sub(radius);
+        let end = (i + radius + 1).min(points.len());
+        let mut x_sum = 0.0;
+        let mut y_sum = 0.0;
+        let mut count = 0usize;
+
+        for j in start..end {
+            x_sum += points[j].0;
+            y_sum += points[j].1;
+            count += 1;
+        }
+
+        let inv = 1.0 / count as f64;
+        smoothed.push((x_sum * inv, y_sum * inv));
+    }
+
+    smoothed
+}
+
+fn resample_path(points: &[(f64, f64)], max_step: f64) -> Vec<(f64, f64)> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+
+    let mut sampled = vec![points[0]];
+    for window in points.windows(2) {
+        let p0 = window[0];
+        let p1 = window[1];
+        let dx = p1.0 - p0.0;
+        let dy = p1.1 - p0.1;
+        let seg_len = (dx * dx + dy * dy).sqrt();
+        if seg_len <= f64::EPSILON {
+            continue;
+        }
+
+        let steps = (seg_len / max_step).ceil() as usize;
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            let x = p0.0 + dx * t;
+            let y = p0.1 + dy * t;
+            if sampled.last().map_or(true, |last| {
+                (last.0 - x).abs() > 1e-9 || (last.1 - y).abs() > 1e-9
+            }) {
+                sampled.push((x, y));
+            }
+        }
+    }
+
+    if sampled.last() != points.last() {
+        sampled.push(*points.last().unwrap());
+    }
+
+    sampled
+}
+
+fn heading_from_points(prev: (f64, f64), curr: (f64, f64)) -> f64 {
+    let dx = curr.0 - prev.0;
+    let dy = curr.1 - prev.1;
+    if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+        return 0.0;
+    }
+    dy.atan2(dx)
+}
+
+fn quaternion_from_yaw(yaw: f64) -> geometry_msgs::msg::Quaternion {
+    let half = yaw / 2.0;
+    geometry_msgs::msg::Quaternion {
+        x: 0.0,
+        y: 0.0,
+        z: half.sin(),
+        w: half.cos(),
+    }
+}
+
 fn build_path_msg(path: &[(usize, usize)], costmap: &Costmap, clock: &Clock) -> Path {
     let mut path_out = Path::default();
     let (sec, nanosec) = clock.now().to_sec_nanosec().unwrap_or((0, 0));
     path_out.header.stamp.sec = sec;
     path_out.header.stamp.nanosec = nanosec;
     path_out.header.frame_id = costmap.header.frame_id.clone();
-    let resolution = costmap.metadata.resolution as f64;
-    let origin_x = costmap.metadata.origin.position.x;
-    let origin_y = costmap.metadata.origin.position.y;
 
-    for &(r, c) in path {
+    let world_points = path_to_world_points(path, costmap);
+    let min_step_sq = (costmap.metadata.resolution as f64 * 1.5).powi(2);
+    let simplified_points = simplify_path(&world_points, min_step_sq);
+    let smoothed_points = smooth_path(&simplified_points, 5);
+    let sample_step = costmap.metadata.resolution as f64 * 2.0;
+    let sampled_points = resample_path(&smoothed_points, sample_step);
+
+    for (i, (x, y)) in sampled_points.iter().enumerate() {
         let mut pose = PoseStamped::default();
         pose.header = path_out.header.clone();
-        pose.pose.position.x = origin_x + (c as f64 + 0.5) * resolution;
-        pose.pose.position.y = origin_y + (r as f64 + 0.5) * resolution;
+        pose.pose.position.x = *x;
+        pose.pose.position.y = *y;
         pose.pose.position.z = 0.0;
+
+        let yaw = if i == 0 {
+            if sampled_points.len() > 1 {
+                heading_from_points(sampled_points[0], sampled_points[1])
+            } else {
+                0.0
+            }
+        } else {
+            heading_from_points(sampled_points[i - 1], sampled_points[i])
+        };
+        pose.pose.orientation = quaternion_from_yaw(yaw);
         path_out.poses.push(pose);
     }
 
@@ -243,6 +376,7 @@ fn main() -> Result<(), RclrsError> {
     let node = executor.create_node("astar_path_publisher")?;
 
     let publisher = node.create_publisher::<Path>("/astar_path")?;
+    let trajectory_publisher = node.create_publisher::<Path>("/astar_trajectory")?;
     let logger = node.logger().clone();
     let clock = node.get_clock();
     let timing_file = Arc::new(Mutex::new(
@@ -382,6 +516,7 @@ fn main() -> Result<(), RclrsError> {
             );
             let path_msg = build_path_msg(&path, &msg, &clock);
             publisher.publish(&path_msg).unwrap();
+            trajectory_publisher.publish(&path_msg).unwrap();
         },
     )?;
 
