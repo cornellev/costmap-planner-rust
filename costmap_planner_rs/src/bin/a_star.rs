@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use costmap_planner_rs::extract::{costmap_to_grid, Costmap, Grid};
+use costmap_planner_rs::extract::{costmap_to_grid, decode_costmap, Costmap, Grid};
 
 mod config;
 mod loc;
@@ -158,10 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let sample = costmap_sub.recv_async().await?;
         let payload = sample.payload().to_bytes();
-        let msg: Costmap = match serde_json::from_slice(&payload) {
+        let msg = match decode_costmap(&payload) {
             Ok(msg) => msg,
             Err(e) => {
-                eprintln!("failed to deserialize costmap: {e}");
+                eprintln!("failed to decode costmap: {e}");
                 continue;
             }
         };
