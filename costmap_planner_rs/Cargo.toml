@@ -2,6 +2,7 @@
 name = "costmap_planner_rs"
 version = "0.1.0"
 edition = "2024"
+autobins = false
 
 [lib]
 name = "costmap_planner_rs"
@@ -12,9 +13,7 @@ name = "a_star"
 path = "src/bin/a_star.rs"
 
 [dependencies]
-rclrs = "0.7"
-
-nav2_msgs = "*"
-nav_msgs = "*"
-geometry_msgs = "*"
-std_msgs = "*"
+zenoh = "1.0.0"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

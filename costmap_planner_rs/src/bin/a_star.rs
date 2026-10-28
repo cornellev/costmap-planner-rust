@@ -1,10 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use rclrs::*;
-use nav2_msgs::msg::Costmap;
-use nav_msgs::msg::Path;
-use geometry_msgs::msg::PoseStamped;
-use costmap_planner_rs::extract::{costmap_to_grid, Grid};
+use costmap_planner_rs::extract::{costmap_to_grid, Costmap, Grid};
+
+mod config;
+mod loc;
 
 #[derive(Copy, Clone, PartialEq)]
 struct HeapItem {
@@ -138,72 +137,80 @@ fn astar(grid: &Grid, start: (usize, usize), goal: (usize, usize)) -> Option<Vec
     None
 }
 
-fn build_path_msg(path: &[(usize, usize)], costmap: &Costmap, clock: &Clock) -> Path {
-    let mut path_out = Path::default();
-    let (sec, nanosec) = clock.now().to_sec_nanosec().unwrap_or((0, 0));
-    path_out.header.stamp.sec = sec;
-    path_out.header.stamp.nanosec = nanosec;
-    path_out.header.frame_id = costmap.header.frame_id.clone();
-    let resolution = costmap.metadata.resolution as f64;
-    let origin_x = costmap.metadata.origin.position.x;
-    let origin_y = costmap.metadata.origin.position.y;
-
-    for &(r, c) in path {
-        let mut pose = PoseStamped::default();
-        pose.header = path_out.header.clone();
-        pose.pose.position.x = origin_x + (c as f64) * resolution;
-        pose.pose.position.y = origin_y + (r as f64) * resolution;
-        pose.pose.position.z = 0.0;
-        path_out.poses.push(pose);
-    }
-
-    path_out
+fn build_trajectory(path: &[(usize, usize)], costmap: &Costmap) -> Vec<loc::Pose> {
+    path.iter()
+        .map(|&(r, c)| {
+            loc::Pose::new(
+                costmap.origin_x + (c as f64) * costmap.resolution,
+                costmap.origin_y + (r as f64) * costmap.resolution,
+                0.0,
+            )
+        })
+        .collect()
 }
 
-fn main() -> Result<(), RclrsError> {
-    let mut executor = Context::default_from_env()?.create_basic_executor();
-    let node = executor.create_node("astar_path_publisher")?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("opening zenoh session pls work");
+    let session = zenoh::open(zenoh::Config::default()).await?;
+    let costmap_sub = session.declare_subscriber(config::COSTMAP_KEY).await?;
 
-    let publisher = node.create_publisher::<Path>("/astar_path")?;
-    let logger = node.logger().clone();
-    let clock = node.get_clock();
+    loop {
+        let sample = costmap_sub.recv_async().await?;
+        let payload = sample.payload().to_bytes();
+        let msg: Costmap = match serde_json::from_slice(&payload) {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("failed to deserialize costmap: {e}");
+                continue;
+            }
+        };
 
-    let _subscription = node.create_subscription(
-        "/costmap_raw",
-        move |msg: Costmap| {
-            let grid = costmap_to_grid(&msg);
+        // just basic sanity checks on the costmap to see if it's like actually valid lol
+        if msg.rows == 0
+            || msg.cols == 0
+            || msg.rows.checked_mul(msg.cols) != Some(msg.data.len())
+            || !msg.resolution.is_finite()
+            || msg.resolution <= 0.0
+            || !msg.origin_x.is_finite()
+            || !msg.origin_y.is_finite()
+        {
+            eprintln!("invalid costmap dimensions, data length, resolution, or origin");
+            continue;
+        }
 
-            let start = match find_free_start(&grid) {
-                Some(s) => s,
-                None => {
-                    log_warn!(&logger, "no free start found");
-                    return;
-                }
-            };
+        let grid = costmap_to_grid(&msg); // just did a basic ahh conversion lol
 
-            let goal = match find_free_goal_forward(&grid, start, 150) {
-                Some(g) => g,
-                None => {
-                    log_warn!(&logger, "no forward goal found");
-                    return;
-                }
-            };
+        let start = match find_free_start(&grid) {
+            Some(s) => s,
+            None => {
+                eprintln!("no free start found");
+                continue;
+            }
+        };
 
-            log_info!(&logger, "start={:?} goal={:?}", start, goal);
-            let path = match astar(&grid, start, goal) {
-                Some(p) => p,
-                None => {
-                    log_warn!(&logger, "found no path from {:?} to {:?}", start, goal);
-                    return;
-                }
-            };
+        // target dist is just a guess, we can adjust this later
+        let goal = match find_free_goal_forward(&grid, start, 150) {
+            Some(g) => g,
+            None => {
+                eprintln!("no forward goal found");
+                continue;
+            }
+        };
 
-            log_info!(&logger, "path found: {} steps", path.len());
-            let path_msg = build_path_msg(&path, &msg, &clock);
-            publisher.publish(&path_msg).unwrap();
-        },
-    )?;
+        println!("start={:?} goal={:?}", start, goal);
+        let path = match astar(&grid, start, goal) {
+            Some(p) => p,
+            None => {
+                eprintln!("found no path from {:?} to {:?}", start, goal);
+                continue;
+            }
+        };
 
-    executor.spin(SpinOptions::default()).first_error()?;
-    Ok(())
+        // out out out
+        println!("path found: {} steps", path.len());
+        let trajectory = build_trajectory(&path, &msg);
+        let payload = serde_json::to_vec(&trajectory)?;
+        session.put(config::TRAJECTORY_KEY, payload).await?;
+    }
 }
