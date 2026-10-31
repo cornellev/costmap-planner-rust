@@ -1,4 +1,5 @@
-pub const COSTMAP_KEY: &str = "cev/perception/costmap_raw";
+//pub const COSTMAP_KEY: &str = "cev/perception/costmap_raw";
+pub const COSTMAP_KEY: &str = "rslidar/global_occupancy";
 pub const TRAJECTORY_KEY: &str = "cev/planning/ref_trajectory";
 pub const POSE_KEY: &str = "cev/localization/pose";
 pub const GOAL_KEY: &str = "cev/commands/goal";
