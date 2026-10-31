@@ -156,6 +156,12 @@ fn plan_once(
     goal: Goal,
 ) -> Option<Vec<loc::Pose>> {
     let mut grid = costmap_to_grid(msg);
+    // shortcut: unseen (255) is free so a goal behind a cone stays reachable; upgrade when the world map is localized
+    for cost in &mut grid.data {
+        if *cost == 255 {
+            *cost = 0;
+        }
+    }
     inflate(
         &mut grid,
         msg.resolution,
