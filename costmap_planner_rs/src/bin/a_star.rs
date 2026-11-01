@@ -156,12 +156,13 @@ fn plan_once(
     goal: Goal,
 ) -> Option<Vec<loc::Pose>> {
     let mut grid = costmap_to_grid(msg);
-    // shortcut: unseen (255) is free so a goal behind a cone stays reachable; upgrade when the world map is localized
-    // for cost in &mut grid.data {
-    //     if *cost == 255 {
-    //         *cost = 0;
-    //     }
-    // }
+    // shortcut: 255 is an unscanned lidar shadow, not a wall. inflate() seeds every
+    // cost >= 253, so leaving 255 seals the corridor. Upgrade when the map is localized.
+    for cost in &mut grid.data {
+        if *cost == 255 {
+            *cost = 0;
+        }
+    }
     inflate(
         &mut grid,
         msg.resolution,
