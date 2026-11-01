@@ -140,11 +140,32 @@ fn astar(grid: &Grid, start: (usize, usize), goal: (usize, usize)) -> Option<Vec
 fn build_trajectory(path: &[(usize, usize)], costmap: &Costmap) -> Vec<loc::Pose> {
     path.iter()
         .map(|&(r, c)| {
+            // Cell center. The corner sits a full cell off a pose on the far edge.
             loc::Pose::new(
-                costmap.origin_x + (c as f64) * costmap.resolution,
-                costmap.origin_y + (r as f64) * costmap.resolution,
+                costmap.origin_x + (c as f64 + 0.5) * costmap.resolution,
+                costmap.origin_y + (r as f64 + 0.5) * costmap.resolution,
                 0.0,
             )
+        })
+        .collect()
+}
+
+/// Pose is inside the start cell, not on its center. A straight plan then
+/// looks a few centimeters to one side and pure pursuit holds a steer.
+/// Only slide by a sub-cell amount; a nearest_free jump must stay put.
+fn snap_start_to_pose(path: Vec<loc::Pose>, pose: &loc::Pose, resolution: f64) -> Vec<loc::Pose> {
+    let Some(first) = path.first() else {
+        return path;
+    };
+    let dx = pose.get_location().x() - first.get_location().x();
+    let dy = pose.get_location().y() - first.get_location().y();
+    if dx * dx + dy * dy > resolution * resolution {
+        return path;
+    }
+    path.into_iter()
+        .map(|p| {
+            let loc = p.get_location();
+            loc::Pose::new(loc.x() + dx, loc.y() + dy, p.get_heading())
         })
         .collect()
 }
@@ -176,7 +197,11 @@ fn plan_once(
     println!("start={:?} goal={:?}", start, goal_cell);
     let path = astar(&grid, start, goal_cell)?;
     println!("path found: {} steps", path.len());
-    Some(build_trajectory(&path, msg))
+    Some(snap_start_to_pose(
+        build_trajectory(&path, msg),
+        pose,
+        msg.resolution,
+    ))
 }
 
 #[tokio::main]
@@ -251,4 +276,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map() -> Costmap {
+        Costmap {
+            rows: 1,
+            cols: 2,
+            resolution: 0.05,
+            origin_x: -25.0,
+            origin_y: -25.0,
+            data: vec![],
+        }
+    }
+
+    #[test]
+    fn straight_plan_starts_on_the_pose() {
+        // floor((0 - (-25)) / 0.05) is 499. A corner vertex there is 5 cm off.
+        let path = build_trajectory(&[(499, 499), (499, 519)], &map());
+        let pose = loc::Pose::new(0.0, 0.0, 0.0);
+        let snapped = snap_start_to_pose(path, &pose, 0.05);
+        let start = snapped[0].get_location();
+        let ahead = snapped[1].get_location();
+        assert!(start.x().abs() < 1e-9 && start.y().abs() < 1e-9);
+        assert!((ahead.x() - 1.0).abs() < 1e-9, "x={}", ahead.x());
+        assert!(ahead.y().abs() < 1e-9, "y={}", ahead.y());
+    }
+
+    #[test]
+    fn snapped_start_stays_put_when_the_cell_is_far() {
+        let path = build_trajectory(&[(499, 480)], &map());
+        let pose = loc::Pose::new(0.0, 0.0, 0.0);
+        let snapped = snap_start_to_pose(path, &pose, 0.05);
+        assert!(snapped[0].get_location().x().abs() > 0.5);
+    }
 }
