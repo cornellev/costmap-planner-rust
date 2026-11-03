@@ -1,5 +1,6 @@
 //pub const COSTMAP_KEY: &str = "cev/perception/costmap_raw";
-pub const COSTMAP_KEY: &str = "cev/sensors/lidar/occupancy_grid/local";
+// The local grid is in the lidar frame. Pose and the goal are in odom.
+pub const COSTMAP_KEY: &str = "cev/sensors/lidar/occupancy_grid/global";
 pub const TRAJECTORY_KEY: &str = "cev/planning/ref_trajectory";
 pub const POSE_KEY: &str = "cev/localization/pose";
 pub const GOAL_KEY: &str = "cev/commands/goal";
