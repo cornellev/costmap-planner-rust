@@ -9,3 +9,7 @@ pub const GOAL_KEY: &str = "cev/commands/goal";
 pub const INSCRIBED_RADIUS_M: f64 = 0.31;
 /// Past the lethal square, cell cost falls from 252 to 1 over this distance.
 pub const DECAY_M: f64 = 0.5;
+
+// Must match pure_pursuit/src/config.rs (WHEELBASE, MAX_STEERING_ANGLE).
+pub const WHEELBASE_M: f64 = 0.66;
+pub const MAX_STEER_RAD: f64 = 11.0_f64.to_radians();
